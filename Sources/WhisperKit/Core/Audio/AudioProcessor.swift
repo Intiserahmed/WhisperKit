@@ -891,10 +891,18 @@ public extension AudioProcessor {
     /// We have a new buffer, process and store it.
     /// NOTE: Assumes audio is 16khz mono
     func processBuffer(_ buffer: [Float]) {
+        // 1) Append new incoming samples
         audioSamples.append(contentsOf: buffer)
         
-    let windowSize = chunkSamples + overlapSamples
-    purgeAudioSamples(keepingLast: windowSize)
+        // 2) Implement sliding window buffer to prevent memory growth
+        // Use WhisperKit's actual window size and padding specifications
+        let sampleRate = WhisperKit.sampleRate // 16,000 Hz
+        let windowSamples = Constants.defaultWindowSamples // 480,000 samples (30s)
+        let windowPadding = 16000 // 1 second padding (as used in TranscribeTask)
+        let maxBufferSize = windowSamples + windowPadding // 496,000 samples total
+        
+        // Purge old samples to maintain constant memory usage
+        purgeAudioSamples(keepingLast: maxBufferSize)
 
         // Find the lowest average energy of the last 20 buffers ~2 seconds
         let minAvgEnergy = self.audioEnergy.suffix(20).reduce(Float.infinity) { min($0, $1.avg) }
@@ -908,9 +916,9 @@ public extension AudioProcessor {
         // Call the callback with the new buffer
         audioBufferCallback?(buffer)
 
-        // Print the current size of the audio buffer
+        // Print the current size of the audio buffer (bounded to maxBufferSize)
         if self.audioSamples.count % (minBufferLength * Int(relativeEnergyWindow)) == 0 {
-            Logging.debug("Current audio size: \(self.audioSamples.count) samples, most recent buffer: \(buffer.count) samples, most recent energy: \(newEnergy)")
+            Logging.debug("Current audio size: \(self.audioSamples.count) samples (max: \(maxBufferSize)), most recent buffer: \(buffer.count) samples, most recent energy: \(newEnergy)")
         }
     }
 
