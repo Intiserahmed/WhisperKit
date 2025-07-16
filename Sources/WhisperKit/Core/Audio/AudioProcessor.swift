@@ -892,6 +892,9 @@ public extension AudioProcessor {
     /// NOTE: Assumes audio is 16khz mono
     func processBuffer(_ buffer: [Float]) {
         audioSamples.append(contentsOf: buffer)
+        
+    let windowSize = chunkSamples + overlapSamples
+    purgeAudioSamples(keepingLast: windowSize)
 
         // Find the lowest average energy of the last 20 buffers ~2 seconds
         let minAvgEnergy = self.audioEnergy.suffix(20).reduce(Float.infinity) { min($0, $1.avg) }
