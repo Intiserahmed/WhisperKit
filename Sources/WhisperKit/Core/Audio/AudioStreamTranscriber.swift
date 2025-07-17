@@ -122,7 +122,6 @@ public actor AudioStreamTranscriber {
         state.currentText = progress.text
         state.currentFallbacks = fallbacks
     }
-    
     private func transcribeCurrentBuffer() async throws {
             // Retrieve the current audio buffer from the audio processor
             let currentBuffer = audioProcessor.audioSamples
@@ -181,22 +180,26 @@ public actor AudioStreamTranscriber {
                         state.confirmedSegments.append(contentsOf: confirmedSegmentsArray)
                     }
 
-                    // --- CORRECTED MEMORY MANAGEMENT FIX ---
-                    // After confirming segments, purge the audio buffer to release memory.
+                    // --- START: THE FIX ---
+                    // This block of code prevents the memory leak.
+
+                    // 1. Calculate how much of the buffer corresponds to the confirmed audio.
                     let purgeUntilSample = Int(state.lastConfirmedSegmentEndSeconds * Float(WhisperKit.sampleRate))
-                    
-                    // We keep a small overlap (e.g., 2 seconds) for context continuity.
+
+                    // 2. Keep a small overlap (e.g., 2 seconds) for context continuity.
                     let overlapSamples = 2 * WhisperKit.sampleRate
                     let samplesToPurge = purgeUntilSample - overlapSamples
 
                     if samplesToPurge > 0 {
-                        // Purge the old audio data from the beginning of the buffer.
+                        // 3. Purge the old audio data from the beginning of the buffer.
                         audioProcessor.purgeAudioSamples(keepingLast: currentBuffer.count - samplesToPurge)
-                        
-                        // **CRITICAL**: Adjust the buffer size tracker to reflect the purged audio.
+
+                        // 4. CRITICAL: Adjust state variables to reflect the now-shorter buffer.
                         state.lastBufferSize -= samplesToPurge
+                        state.lastConfirmedSegmentEndSeconds -= Float(samplesToPurge) / Float(WhisperKit.sampleRate)
                     }
-                    // --- END OF FIX ---
+
+                    // --- END: THE FIX ---
                 }
 
                 // Update transcriptions to reflect the remaining segments
