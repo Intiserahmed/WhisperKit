@@ -116,6 +116,9 @@ public protocol AudioProcessing {
         startAt startIndex: Int,
         toLength frameLength: Int
     ) -> (any AudioProcessorOutputType)?
+    
+    /// Update the confirmed segment end position for 6-minute buffer constraint
+    func updateConfirmedSegmentEnd(_ position: Int)
 }
 
 /// Overrideable default methods for AudioProcessing
