@@ -124,64 +124,88 @@ public actor AudioStreamTranscriber {
     }
     
     private func transcribeCurrentBuffer() async throws {
-         // Retrieve the current audio buffer from the audio processor
-         let currentBuffer = audioProcessor.audioSamples
+            // Retrieve the current audio buffer from the audio processor
+            let currentBuffer = audioProcessor.audioSamples
 
-         // ... existing buffer size and VAD checks ...
+            // Calculate the size and duration of the next buffer segment
+            let nextBufferSize = currentBuffer.count - state.lastBufferSize
+            let nextBufferSeconds = Float(nextBufferSize) / Float(WhisperKit.sampleRate)
 
-         // Run transcribe
-         state.lastBufferSize = currentBuffer.count
+            // Only run the transcribe if the next buffer has at least 1 second of audio
+            guard nextBufferSeconds > 1 else {
+                if state.currentText == "" {
+                    state.currentText = "Waiting for speech..."
+                }
+                return try await Task.sleep(nanoseconds: 100_000_000) // sleep for 100ms for next buffer
+            }
 
-         let transcription = try await transcribeAudioSamples(Array(currentBuffer))
+            if useVAD {
+                let voiceDetected = AudioProcessor.isVoiceDetected(
+                    in: audioProcessor.relativeEnergy,
+                    nextBufferInSeconds: nextBufferSeconds,
+                    silenceThreshold: silenceThreshold
+                )
+                // Only run the transcribe if the next buffer has voice
+                if !voiceDetected {
+                    Logging.debug("No voice detected, skipping transcribe")
+                    if state.currentText == "" {
+                        state.currentText = "Waiting for speech..."
+                    }
+                    // Sleep for 100ms and check the next buffer
+                    return try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
 
-         state.currentText = ""
-         state.unconfirmedText = []
-         let segments = transcription.segments
+            // Run transcribe
+            state.lastBufferSize = currentBuffer.count
 
-         // Logic for moving segments to confirmedSegments
-         if segments.count > requiredSegmentsForConfirmation {
-             // Calculate the number of segments to confirm
-             let numberOfSegmentsToConfirm = segments.count - requiredSegmentsForConfirmation
-             let confirmedSegmentsArray = Array(segments.prefix(numberOfSegmentsToConfirm))
-             let remainingSegments = Array(segments.suffix(requiredSegmentsForConfirmation))
+            let transcription = try await transcribeAudioSamples(Array(currentBuffer))
 
-             // Update lastConfirmedSegmentEnd based on the last confirmed segment
-             if let lastConfirmedSegment = confirmedSegmentsArray.last, lastConfirmedSegment.end > state.lastConfirmedSegmentEndSeconds {
-                 state.lastConfirmedSegmentEndSeconds = lastConfirmedSegment.end
+            state.currentText = ""
+            state.unconfirmedText = []
+            let segments = transcription.segments
 
-                 // Add confirmed segments to the confirmedSegments array
-                 if !state.confirmedSegments.contains(confirmedSegmentsArray) {
-                     state.confirmedSegments.append(contentsOf: confirmedSegmentsArray)
-                 }
+            // Logic for moving segments to confirmedSegments
+            if segments.count > requiredSegmentsForConfirmation {
+                // Calculate the number of segments to confirm
+                let numberOfSegmentsToConfirm = segments.count - requiredSegmentsForConfirmation
+                let confirmedSegmentsArray = Array(segments.prefix(numberOfSegmentsToConfirm))
+                let remainingSegments = Array(segments.suffix(requiredSegmentsForConfirmation))
 
-                 // --- START: MEMORY MANAGEMENT FIX ---
+                // Update lastConfirmedSegmentEnd based on the last confirmed segment
+                if let lastConfirmedSegment = confirmedSegmentsArray.last, lastConfirmedSegment.end > state.lastConfirmedSegmentEndSeconds {
+                    state.lastConfirmedSegmentEndSeconds = lastConfirmedSegment.end
 
-                 // Calculate the sample index for the end of the last fully confirmed segment.
-                 let purgeUntilSample = Int(state.lastConfirmedSegmentEndSeconds * Float(WhisperKit.sampleRate))
+                    // Add confirmed segments to the confirmedSegments array
+                    if !state.confirmedSegments.contains(confirmedSegmentsArray) {
+                        state.confirmedSegments.append(contentsOf: confirmedSegmentsArray)
+                    }
 
-                 // We keep a small overlap (e.g., 2 seconds) for context continuity.
-                 let overlapSamples = 2 * WhisperKit.sampleRate
-                 let samplesToPurge = purgeUntilSample - overlapSamples
+                    // --- CORRECTED MEMORY MANAGEMENT FIX ---
+                    // After confirming segments, purge the audio buffer to release memory.
+                    let purgeUntilSample = Int(state.lastConfirmedSegmentEndSeconds * Float(WhisperKit.sampleRate))
+                    
+                    // We keep a small overlap (e.g., 2 seconds) for context continuity.
+                    let overlapSamples = 2 * WhisperKit.sampleRate
+                    let samplesToPurge = purgeUntilSample - overlapSamples
 
-                 if samplesToPurge > 0 {
-                     // Purge the audio buffer to free up memory
-                     audioProcessor.purgeAudioSamples(keepingLast: currentBuffer.count - samplesToPurge)
+                    if samplesToPurge > 0 {
+                        // Purge the old audio data from the beginning of the buffer.
+                        audioProcessor.purgeAudioSamples(keepingLast: currentBuffer.count - samplesToPurge)
+                        
+                        // **CRITICAL**: Adjust the buffer size tracker to reflect the purged audio.
+                        state.lastBufferSize -= samplesToPurge
+                    }
+                    // --- END OF FIX ---
+                }
 
-                     // **CRITICAL**: Adjust state variables to reflect the purged buffer.
-                     // This prevents incorrect calculations in the next transcription loop.
-                     state.lastBufferSize -= samplesToPurge
-                 }
-                 
-                 // --- END: MEMORY MANAGEMENT FIX ---
-             }
-
-             // Update transcriptions to reflect the remaining segments
-             state.unconfirmedSegments = remainingSegments
-         } else {
-             // Handle the case where segments are fewer or equal to required
-             state.unconfirmedSegments = segments
-         }
-     }
+                // Update transcriptions to reflect the remaining segments
+                state.unconfirmedSegments = remainingSegments
+            } else {
+                // Handle the case where segments are fewer or equal to required
+                state.unconfirmedSegments = segments
+            }
+        }
     
     private func transcribeAudioSamples(_ samples: [Float]) async throws -> TranscriptionResult {
         var options = decodingOptions
