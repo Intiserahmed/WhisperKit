@@ -122,6 +122,7 @@ public actor AudioStreamTranscriber {
         state.currentText = progress.text
         state.currentFallbacks = fallbacks
     }
+    
     private func transcribeCurrentBuffer() async throws {
             // Retrieve the current audio buffer from the audio processor
             let currentBuffer = audioProcessor.audioSamples
@@ -178,28 +179,35 @@ public actor AudioStreamTranscriber {
                     // Add confirmed segments to the confirmedSegments array
                     if !state.confirmedSegments.contains(confirmedSegmentsArray) {
                         state.confirmedSegments.append(contentsOf: confirmedSegmentsArray)
+
+                        // --- FIX FOR SLOW MEMORY LEAK ---
+                        // To prevent the history from growing forever, we will only keep
+                        // a limited number of the most recent segments in the state.
+                        let maxHistorySegments = 15
+                        if state.confirmedSegments.count > maxHistorySegments {
+                            let segmentsToRemove = state.confirmedSegments.count - maxHistorySegments
+                            state.confirmedSegments.removeFirst(segmentsToRemove)
+                        }
+                        // --- END OF FIX ---
                     }
 
-                    // --- START: THE FIX ---
-                    // This block of code prevents the memory leak.
-
-                    // 1. Calculate how much of the buffer corresponds to the confirmed audio.
+                    // --- FIX FOR AUDIO BUFFER MEMORY LEAK ---
+                    // After confirming segments, purge the audio buffer to release memory.
                     let purgeUntilSample = Int(state.lastConfirmedSegmentEndSeconds * Float(WhisperKit.sampleRate))
-
-                    // 2. Keep a small overlap (e.g., 2 seconds) for context continuity.
+                    
+                    // We keep a small overlap (e.g., 2 seconds) for context continuity.
                     let overlapSamples = 2 * WhisperKit.sampleRate
                     let samplesToPurge = purgeUntilSample - overlapSamples
 
                     if samplesToPurge > 0 {
-                        // 3. Purge the old audio data from the beginning of the buffer.
+                        // Purge the old audio data from the beginning of the buffer.
                         audioProcessor.purgeAudioSamples(keepingLast: currentBuffer.count - samplesToPurge)
-
-                        // 4. CRITICAL: Adjust state variables to reflect the now-shorter buffer.
+                        
+                        // **CRITICAL**: Adjust the state variables to reflect the now-shorter buffer.
                         state.lastBufferSize -= samplesToPurge
                         state.lastConfirmedSegmentEndSeconds -= Float(samplesToPurge) / Float(WhisperKit.sampleRate)
                     }
-
-                    // --- END: THE FIX ---
+                    // --- END OF FIX ---
                 }
 
                 // Update transcriptions to reflect the remaining segments
