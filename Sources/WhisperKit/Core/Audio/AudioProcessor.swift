@@ -210,6 +210,9 @@ open class AudioProcessor: NSObject, AudioProcessing {
     private var lastBufferTime: Date = Date()
     private var lastConfirmedTime: Date = Date()
     
+    // Track buffer trimming for seek position mapping
+    private var bufferStartOffset: Int = 0
+    
     open func padOrTrim(fromArray audioArray: [Float], startAt startIndex: Int, toLength frameLength: Int) -> (any AudioProcessorOutputType)? {
         return AudioProcessor.padOrTrimAudio(fromArray: audioArray, startAt: startIndex, toLength: frameLength, saveSegment: false)
     }
@@ -912,6 +915,10 @@ public extension AudioProcessor {
         if audioSamples.count > maxBufferSize {
             let trimStart = audioSamples.count - maxBufferSize
             audioSamples = ContiguousArray(audioSamples[trimStart...])
+            
+            // Track how many samples we've trimmed from the beginning
+            bufferStartOffset += trimStart
+            Logging.debug("🔄 [AudioProcessor] Trimmed \(trimStart) samples, new buffer offset: \(bufferStartOffset)")
         }
 
         // Find the lowest average energy of the last 20 buffers ~2 seconds
@@ -1081,10 +1088,33 @@ public extension AudioProcessor {
         let bounds = calculateSeekBounds(confirmedEnd: confirmedSegmentEnd, maxLookback: maxLookbackSamples)
         return max(bounds.min, min(seek, bounds.max))
     }
+    
+    // MARK: - Buffer offset mapping
+    
+    /// Get the current buffer start offset (how many samples have been trimmed from the beginning)
+    func getBufferStartOffset() -> Int {
+        return bufferStartOffset
+    }
+    
+    /// Convert absolute seek position to buffer-relative position
+    func mapSeekToBufferPosition(_ absoluteSeek: Int) -> Int {
+        return absoluteSeek - bufferStartOffset
+    }
+    
+    /// Convert buffer-relative position to absolute seek position
+    func mapBufferPositionToSeek(_ bufferPosition: Int) -> Int {
+        return bufferPosition + bufferStartOffset
+    }
 
     func startRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)? = nil) throws {
         audioSamples = []
         audioEnergy = []
+        
+        // Reset seek constraint properties
+        confirmedSegmentEnd = 0
+        bufferStartOffset = 0
+        lastBufferTime = Date()
+        lastConfirmedTime = Date()
 
         try? setupAudioSessionForDevice()
 
