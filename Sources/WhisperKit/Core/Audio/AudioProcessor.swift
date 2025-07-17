@@ -116,9 +116,6 @@ public protocol AudioProcessing {
         startAt startIndex: Int,
         toLength frameLength: Int
     ) -> (any AudioProcessorOutputType)?
-    
-    /// Update the confirmed segment end position for 6-minute buffer constraint
-    func updateConfirmedSegmentEnd(_ position: Int)
 }
 
 /// Overrideable default methods for AudioProcessing
@@ -207,14 +204,6 @@ open class AudioProcessor: NSObject, AudioProcessing {
 
     public var audioBufferCallback: (([Float]) -> Void)?
     public var minBufferLength = Int(Double(WhisperKit.sampleRate) * 0.1) // 0.1 second of audio at 16,000 Hz
-    
-    // MARK: - Seek constraint properties
-    private var confirmedSegmentEnd: Int = 0
-    private var lastBufferTime: Date = Date()
-    private var lastConfirmedTime: Date = Date()
-    
-    // Track buffer trimming for seek position mapping
-    private var bufferStartOffset: Int = 0
     
     open func padOrTrim(fromArray audioArray: [Float], startAt startIndex: Int, toLength frameLength: Int) -> (any AudioProcessorOutputType)? {
         return AudioProcessor.padOrTrimAudio(fromArray: audioArray, startAt: startIndex, toLength: frameLength, saveSegment: false)
@@ -902,27 +891,7 @@ public extension AudioProcessor {
     /// We have a new buffer, process and store it.
     /// NOTE: Assumes audio is 16khz mono
     func processBuffer(_ buffer: [Float]) {
-        // 1) Append new incoming samples
         audioSamples.append(contentsOf: buffer)
-        
-        // 2) Implement 6-minute sliding window with edge case handling
-        let sampleRate = WhisperKit.sampleRate // 16,000 Hz
-        let maxLookbackSamples = 6 * 60 * sampleRate // 6 minutes = 5,760,000 samples
-        let confirmedSegmentEnd = getConfirmedSegmentEnd()
-        
-        // Calculate seek bounds with edge case handling
-        let bounds = calculateSeekBounds(confirmedEnd: confirmedSegmentEnd, maxLookback: maxLookbackSamples)
-        let maxBufferSize = bounds.max - bounds.min
-        
-        // Purge old samples to maintain 6-minute window
-        if audioSamples.count > maxBufferSize {
-            let trimStart = audioSamples.count - maxBufferSize
-            audioSamples = ContiguousArray(audioSamples[trimStart...])
-            
-            // Track how many samples we've trimmed from the beginning
-            bufferStartOffset += trimStart
-            Logging.debug("🔄 [AudioProcessor] Trimmed \(trimStart) samples, new buffer offset: \(bufferStartOffset)")
-        }
 
         // Find the lowest average energy of the last 20 buffers ~2 seconds
         let minAvgEnergy = self.audioEnergy.suffix(20).reduce(Float.infinity) { min($0, $1.avg) }
@@ -936,9 +905,9 @@ public extension AudioProcessor {
         // Call the callback with the new buffer
         audioBufferCallback?(buffer)
 
-        // Print the current size of the audio buffer (bounded to maxBufferSize)
+        // Print the current size of the audio buffer
         if self.audioSamples.count % (minBufferLength * Int(relativeEnergyWindow)) == 0 {
-            Logging.debug("Current audio size: \(self.audioSamples.count) samples (max: \(maxBufferSize)), most recent buffer: \(buffer.count) samples, most recent energy: \(newEnergy)")
+            Logging.debug("Current audio size: \(self.audioSamples.count) samples, most recent buffer: \(buffer.count) samples, most recent energy: \(newEnergy)")
         }
     }
 
@@ -1042,82 +1011,10 @@ public extension AudioProcessor {
             audioSamples.removeFirst(audioSamples.count - keep)
         }
     }
-    
-    // MARK: - Seek constraint helper functions
-    
-    private func getConfirmedSegmentEnd() -> Int {
-        // Handle stream interruption
-        let timeSinceLastBuffer = Date().timeIntervalSince(lastBufferTime)
-        if timeSinceLastBuffer > 5.0 {
-            let maxLookbackSamples = 6 * 60 * WhisperKit.sampleRate
-            confirmedSegmentEnd = max(0, audioSamples.count - maxLookbackSamples)
-        }
-        
-        // Handle transcription failures - force advance if stuck too long
-        let timeSinceConfirmed = Date().timeIntervalSince(lastConfirmedTime)
-        if timeSinceConfirmed > 30.0 {
-            let estimatedPosition = audioSamples.count - (2 * WhisperKit.sampleRate)
-            confirmedSegmentEnd = max(confirmedSegmentEnd, estimatedPosition)
-            lastConfirmedTime = Date()
-        }
-        
-        lastBufferTime = Date()
-        return confirmedSegmentEnd
-    }
-    
-    private func calculateSeekBounds(confirmedEnd: Int, maxLookback: Int) -> (min: Int, max: Int) {
-        let totalAudioLength = audioSamples.count
-        
-        // Phase 1: First 6 minutes - use everything from start
-        if totalAudioLength <= maxLookback {
-            return (min: 0, max: totalAudioLength)
-        }
-        
-        // Phase 2: After 6 minutes - sliding window
-        if confirmedEnd <= maxLookback {
-            return (min: 0, max: confirmedEnd)
-        } else {
-            return (min: confirmedEnd - maxLookback, max: confirmedEnd)
-        }
-    }
-    
-    func updateConfirmedSegmentEnd(_ position: Int) {
-        confirmedSegmentEnd = max(confirmedSegmentEnd, position)
-        lastConfirmedTime = Date()
-    }
-    
-    func validateSeekPosition(_ seek: Int) -> Int {
-        let maxLookbackSamples = 6 * 60 * WhisperKit.sampleRate
-        let bounds = calculateSeekBounds(confirmedEnd: confirmedSegmentEnd, maxLookback: maxLookbackSamples)
-        return max(bounds.min, min(seek, bounds.max))
-    }
-    
-    // MARK: - Buffer offset mapping
-    
-    /// Get the current buffer start offset (how many samples have been trimmed from the beginning)
-    func getBufferStartOffset() -> Int {
-        return bufferStartOffset
-    }
-    
-    /// Convert absolute seek position to buffer-relative position
-    func mapSeekToBufferPosition(_ absoluteSeek: Int) -> Int {
-        return absoluteSeek - bufferStartOffset
-    }
-    
-    /// Convert buffer-relative position to absolute seek position
-    func mapBufferPositionToSeek(_ bufferPosition: Int) -> Int {
-        return bufferPosition + bufferStartOffset
-    }
 
     func startRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)? = nil) throws {
         audioSamples = []
         audioEnergy = []
-        
-        // Reset seek constraint properties
-        confirmedSegmentEnd = 0
-        bufferStartOffset = 0
-        lastBufferTime = Date()
-        lastConfirmedTime = Date()
 
         try? setupAudioSessionForDevice()
 
